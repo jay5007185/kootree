@@ -17,6 +17,7 @@ from scripts.dashboard_work_orders import load_work_orders
 from scripts.official_supabase_ui import official_section, official_reader, register_official
 from scripts.official_supabase import load_snapshot, records_from_geojson, filter_records
 from scripts.supabase_data import load_trees, empty_trees, load_reports, normalize_reports, attach_report_summary, load_demo_reports, normalize_demo_reports, attach_demo_risks
+from scripts.civic_data import load_civic, empty_civic, attach_civic, civic_group, ensure_civic_columns
 
 try:
     trees = load_trees()
@@ -24,6 +25,15 @@ try:
 except ValueError as error:
     trees = empty_trees()
     data_mode = f'Supabase 尚未載入：{error}'
+
+# 樹靈記 App 的公民護樹資料（認領、樹況、集氣、時間軸、請願）。各表獨立載入，缺哪張就標哪張。
+CIVIC = empty_civic()
+civic_message = '樹木資料尚未載入，略過公民護樹資料'
+if len(trees):
+    CIVIC = load_civic()
+    civic_message = '；'.join(CIVIC['messages'].values())
+trees = attach_civic(trees, CIVIC)
+CIVIC_READY = any(len(CIVIC[key]) for key in ('claims', 'status', 'events', 'petitions'))
 
 reports = normalize_reports([])
 reports_ready = False
@@ -33,7 +43,7 @@ if len(trees):
         reports = load_reports()
         trees = attach_report_summary(trees, reports)
         reports_ready = True
-        report_message = f'通報已連線：全庫 {len(reports):,} 筆；圖表僅計算目前行道樹範圍（含已排除通報）'
+        report_message = f'通報已連線：全庫 {len(reports):,} 筆；圖表只計算目前篩選的樹木範圍（含已排除通報）'
     except ValueError as error:
         report_message = f'通報載入失敗：{error}'
 
@@ -99,6 +109,9 @@ def metric(title, value_id, icon, tone=''):
         return html.Button(children, id=f'{value_id}_link', n_clicks=0, className=f'metric metric-action {tone}')
     return html.Div(children,className=f'metric {tone}'.strip())
 
+def civic_tile(title, value_id, icon_name, tone=''):
+    return html.Div([html.Div(html.Span(className='botanical-icon', style={'maskImage':f'url({app.get_asset_url("branding/icons/" + icon_name + ".svg")})'}, **{'aria-hidden':'true'}),className='metric-icon'),html.Div(title,className='metric-label'),html.Div(id=value_id,className='metric-value')],className=f'metric {tone}'.strip())
+
 app.layout = html.Div([
     dcc.Store(id='drill_filter', data={}),
     dcc.Store(id='official_overlay', data=[]),
@@ -129,12 +142,12 @@ app.layout = html.Div([
             html.Details([html.Summary('資料模式'),dcc.RadioItems(id='data_source',options=[{'label':'真實通報','value':'real'},{'label':'模擬通報（展示用）','value':'demo'}],value=INITIAL_MODE,className='radio-items')],className='filter-block'),
             html.Div([
                 html.Div('資料說明',className='filter-group-title'),
-                html.P('樹籍、通報與養護規則來自 Supabase。模擬通報明確標示；缺少的工單、班組及結案日期不推估。',className='help-text'),
+                html.P('樹籍（行道樹與受保護樹木）、通報、認領、樹況、集氣與養護規則來自 Supabase。模擬通報明確標示；缺少的工單、班組及結案日期不推估。',className='help-text'),
                 html.A('官方資料集 ↗',href='https://data.taipei/dataset/detail?id=7a49d00c-a5ff-4a6b-be9e-aaa6dc1ff7e8',target='_blank',className='source-link'),
             ],className='filter-block subtle-block'),
         ],className='sidebar'),
         html.Main([
-            html.Nav([html.A('行道樹總覽',href='#tree-overview'),html.A('樹木與移除／移植地圖',href='#map-workspace')],className='data-navigation', **{'aria-label':'資料區塊導覽'}),
+            html.Nav([html.A('樹木總覽',href='#tree-overview'),html.A('樹木與移除／移植地圖',href='#map-workspace'),html.A('公民護樹',href='#civic')],className='data-navigation', **{'aria-label':'資料區塊導覽'}),
             html.Div([
                 metric('符合條件樹木','total_trees','樹','primary'),
                 metric('待確認通報','open_cases','件','warning'),
@@ -147,7 +160,7 @@ app.layout = html.Div([
             ],className='metric-grid metric-grid-wide',id='tree-overview'),
             html.Div([
                 html.Section([html.Div([html.Div('樹木分布地圖',className='panel-title'),html.Span('點選樹木，認識身邊的老朋友',className='note')],className='section-heading'),html.Div([
-                    dcc.RadioItems(id='map_mode', options=[{'label':'樹種分布','value':'species'},{'label':'養護月份提示','value':'care'},{'label':'通報熱點','value':'issue'},{'label':'風險分級','value':'risk'},{'label':'移除／移植','value':'official'}],value='species',className='map-layer-options',style={'display':'flex','flexWrap':'wrap','gap':'4px'},labelStyle={'display':'inline-flex','alignItems':'center','margin':0},inputStyle={'position':'absolute','opacity':0,'width':'1px','height':'1px'}),
+                    dcc.RadioItems(id='map_mode', options=[{'label':'樹種分布','value':'species'},{'label':'養護月份提示','value':'care'},{'label':'通報熱點','value':'issue'},{'label':'風險分級','value':'risk'},{'label':'護樹狀態','value':'civic'},{'label':'移除／移植','value':'official'}],value='species',className='map-layer-options',style={'display':'flex','flexWrap':'wrap','gap':'4px'},labelStyle={'display':'inline-flex','alignItems':'center','margin':0},inputStyle={'position':'absolute','opacity':0,'width':'1px','height':'1px'}),
                     html.Button('清除圖卡篩選',id='clear_drill',className='clear-drill-btn map-clear-btn',style={'width':'auto','margin':0}),
                 ],className='map-toolbar',style={'display':'flex','alignItems':'center','flexWrap':'wrap','justifyContent':'space-between','gap':'10px'}),html.Div(id='drill_label',className='drill-label muted'),dcc.Graph(id='tree_map',config={'displayModeBar':'hover','displaylogo':False,'scrollZoom':True},style={'height':'540px'}),official_section()],className='surface map-panel'),
                 html.Section([
@@ -165,7 +178,7 @@ app.layout = html.Div([
                 html.Section([html.Div('待確認通報經過天數',className='panel-title'),html.P('天數依 Supabase 通報日期計算；確認通報不代表已結案，分組不代表法定處理期限。',className='help-text'),dcc.Graph(id='age_chart',config={'displayModeBar':False})],className='surface')
             ],className='chart-grid'),
             html.Section([html.Div([html.Div('篩選結果明細',className='panel-title'),html.Button('匯出篩選 CSV',id='export_button',className='export-btn')],className='section-heading'),
-                dash_table.DataTable(id='tree_table',columns=[{'name':label,'id':col} for col,label in [('tree_code','樹木編號'),('data_origin','資料性質'),('district','行政區'),('road','路段'),('species','樹種'),('issue_type','通報類型'),('issue_status','通報確認狀態'),('risk_level','風險'),('risk_score','分數'),('diameter','胸徑（來源值）'),('height','樹高（來源值）'),('survey_date','調查日期')]],page_size=12,sort_action='native',style_table={'overflowX':'auto'},style_cell={'fontFamily':'Noto Sans TC, sans-serif','textAlign':'left','padding':'11px','border':'none','fontSize':'12px','backgroundColor':'#fffdf7','color':'#2e4534'},style_header={'backgroundColor':'#eeeadd','fontWeight':'bold','color':'#455b52'},style_data_conditional=[{'if':{'row_index':'odd'},'backgroundColor':'#faf8f1'}]),dcc.Download(id='csv_download')],className='surface table-panel'),
+                dash_table.DataTable(id='tree_table',columns=[{'name':label,'id':col} for col,label in [('tree_code','樹木編號'),('tree_kind','類型'),('data_origin','資料性質'),('district','行政區'),('road','路段'),('species','樹種'),('tree_status','樹況'),('watch_count','集氣'),('issue_type','通報類型'),('issue_status','通報確認狀態'),('risk_level','風險'),('risk_score','分數'),('diameter','胸徑（來源值）'),('height','樹高（來源值）'),('survey_date','調查日期')]],page_size=12,sort_action='native',style_table={'overflowX':'auto'},style_cell={'fontFamily':'Noto Sans TC, sans-serif','textAlign':'left','padding':'11px','border':'none','fontSize':'12px','backgroundColor':'#fffdf7','color':'#2e4534'},style_header={'backgroundColor':'#eeeadd','fontWeight':'bold','color':'#455b52'},style_data_conditional=[{'if':{'row_index':'odd'},'backgroundColor':'#faf8f1'}]),dcc.Download(id='csv_download')],className='surface table-panel'),
             html.Section([
                 html.Div('案件與養護資料中心', className='panel-title'),html.P(id='source_message',className='help-text'),
                 html.P('與上方篩選同步，逐筆呈現 Supabase 通報與已提供的風險評估。工單、班組、巡檢與結案資料若尚未提供，會明確提示。', className='help-text'),
@@ -185,7 +198,28 @@ app.layout = html.Div([
                 dcc.Download(id='operations_download'),
                 html.Div(id='tree_history', className='tree-detail'),
             ], className='surface table-panel', id='operations'),
-            html.Footer([html.Div('做伙顧樹 KooTree · 做伙顧樹，讓樹安好。',className='footer-brand'),html.Span('資料來源：Supabase｜模擬通報、風險分數均有標示，不可作為實際樹木安全診斷或養護指示。')],className='footer')
+            html.Section([
+                html.Div([html.Div('公民護樹 · 樹靈記 App 即時資料', className='panel-title'),html.Span('認領、集氣、樹況與請願由 App 使用者產生，與通報同為真實資料',className='note')],className='section-heading'),
+                html.P(civic_message, className='help-text'),
+                html.Div([
+                    civic_tile('認領中樹木','civic_claims','leaf','primary'),
+                    civic_tile('集氣票數','civic_watch','rate'),
+                    civic_tile('樹況非健康','civic_status','risk','warning'),
+                    civic_tile('請願空位 · 募集中','civic_petitions','place'),
+                ],className='metric-grid'),
+                dcc.Tabs(id='civic_tab', value='status', children=[
+                    dcc.Tab(label='樹況與集氣', value='status'),
+                    dcc.Tab(label='認領中', value='claims'),
+                    dcc.Tab(label='時間軸', value='events'),
+                    dcc.Tab(label='請願進度', value='petitions'),
+                ]),
+                html.Div(id='civic_summary', className='drill-label active'),
+                dash_table.DataTable(id='civic_table', page_size=10, sort_action='native', filter_action='native',
+                    style_table={'overflowX':'auto'}, style_cell={'textAlign':'left','padding':'12px','fontFamily':'inherit','minWidth':'100px','backgroundColor':'#fffdf7','color':'#2e4534'},
+                    style_header={'backgroundColor':'#eef0e3','fontWeight':'bold'}),
+                html.P('樹況只有已驗證的管理單位帳號能改；集氣達 30 票、單位 7 天未回應等規則在 App 端。請願空位依地址比對行政區。清單最多顯示 1,000 筆。', className='help-text'),
+            ], className='surface table-panel', id='civic'),
+            html.Footer([html.Div('做伙顧樹 KooTree · 做伙顧樹，讓樹安好。',className='footer-brand'),html.Span('資料來源：Supabase（臺北市文化局受保護樹木、公園處行道樹、樹靈記 App 公民資料）｜模擬通報、風險分數均有標示，不可作為實際樹木安全診斷或養護指示。')],className='footer')
         ],className='content')
     ],className='layout')
 ],className='page')
@@ -340,7 +374,7 @@ def render_care_items(df, month):
 @app.callback(Output('tree_map','figure'),Output('total_trees','children'),Output('district_count','children'),Output('open_cases','children'),Output('case_rate','children'),Output('high_risk_count','children'),Output('avg_case_age','children'),Output('species_count','children'),Output('care_count','children'),Output('species_chart','figure'),Output('district_chart','figure'),Output('issue_chart','figure'),Output('rate_chart','figure'),Output('tree_table','data'),Output('care_list','children'),Output('priority_roads','children'),Input('district_filter','value'),Input('road_filter','value'),Input('species_filter','value'),Input('issue_filter','value'),Input('status_filter','value'),Input('month_filter','value'),Input('care_only','value'),Input('map_mode','value'),Input('drill_filter','data'),Input('data_source','value'),Input('official_topic','value'),Input('official_query','value'),Input('official_case_select','value'))
 def update_dashboard(district,road,species,issue,status,month,care_only,map_mode,drill_filter,data_source='real',official_topic='all',official_query='',official_selected=None,map_view=None):
     _, reports, reports_ready, _ = mode_data(data_source)
-    df=apply_drill_filter(filter_data(district,road,species,issue,status,month,care_only,data_source),drill_filter,data_source)
+    df=ensure_civic_columns(apply_drill_filter(filter_data(district,road,species,issue,status,month,care_only,data_source),drill_filter,data_source))
     # The denominator is the location/species population before report filters.
     population = filter_data(district,road,species,'all','all',month,care_only,data_source)
     spatial_drill = drill_filter if (drill_filter or {}).get('type') != 'issue' else None
@@ -380,12 +414,17 @@ def update_dashboard(district,road,species,issue,status,month,care_only,map_mode
             plotted=plotted.copy()
             plotted['map_group']=plotted['issue_type']
             groups=sorted(set(plotted['map_group']))
-            colors={'落枝枯枝':'#b9473f','側枝遮擋':'#cf7c2b','根系隆起':'#8c6f34','病蟲害':'#8b579c','落果飛絮':'#d49b3b','樹木傾斜':'#7c3f33','無通報':'#6b8f80'}
+            colors={'落枝枯枝':'#b9473f','側枝遮擋':'#cf7c2b','根系隆起':'#8c6f34','病蟲害':'#8b579c','落果飛絮':'#d49b3b','樹木傾斜':'#7c3f33','疑似病徵':'#8b579c','斷枝倒伏':'#b9473f','被砍或消失':'#7c3f33','樹牌遺失':'#8c6f34','新植':'#287c5d','其他':'#9a7952','無通報':'#6b8f80'}
         elif map_mode=='risk':
             plotted=plotted.copy()
             plotted['map_group']=plotted['risk_level']
             groups=['高','中','低','未提供']
             colors={'高':'#bd3f37','中':'#d99132','低':'#287c5d','未提供':'#8a948e'}
+        elif map_mode=='civic':
+            plotted=plotted.copy()
+            plotted['map_group']=civic_group(plotted)
+            groups=['已移除','預定移除','觀察中','已補植','集氣中','認領中','無紀錄']
+            colors={'已移除':'#7c3f33','預定移除':'#bd3f37','觀察中':'#d99132','已補植':'#397c89','集氣中':'#80629b','認領中':'#287c5d','無紀錄':'#b8bfb6'}
         else:
             plotted=plotted.copy()
             plotted['map_group']=plotted['species'].apply(lambda s:s if s in top_species else '其他樹種')
@@ -396,10 +435,10 @@ def update_dashboard(district,road,species,issue,status,month,care_only,map_mode
         for group in groups:
             part=plotted[plotted['map_group']==group]
             if part.empty:continue
-            custom=part[['tree_id','district','road','species','tree_code']].fillna('').astype(str).to_numpy()
+            custom=part[['tree_id','district','road','species','tree_code','tree_kind','tree_status','watch_count']].fillna('').astype(str).to_numpy()
             fig.add_trace(go.Scattermapbox(lat=part['latitude'],lon=part['longitude'],mode='markers',name=group,
-                marker={'size':(5.5 if group=='其他樹木' else 8) if map_mode=='care' else (5 if map_mode=='official' else (10 if group=='高' else 7)),'color':colors.get(group,'#587746'),'opacity':(.48 if group=='其他樹木' else .95) if map_mode=='care' else (.35 if map_mode=='official' else .88)},customdata=custom,
-                hovertemplate='<b>%{customdata[3]}</b><br>%{customdata[1]} · %{customdata[2]}<br>樹木編號: %{customdata[4]}<extra></extra>'))
+                marker={'size':(5.5 if group in ('其他樹木','無紀錄') else 8) if map_mode in ('care','civic') else (5 if map_mode=='official' else (10 if group=='高' else 7)),'color':colors.get(group,'#587746'),'opacity':(.4 if group in ('其他樹木','無紀錄') else .95) if map_mode in ('care','civic') else (.35 if map_mode=='official' else .88)},customdata=custom,
+                hovertemplate='<b>%{customdata[3]}</b>｜%{customdata[5]}<br>%{customdata[1]} · %{customdata[2]}<br>樹木編號: %{customdata[4]}<br>樹況: %{customdata[6]}｜集氣 %{customdata[7]}<extra></extra>'))
     fig.update_layout(mapbox={'style':MAP_STYLE,'center':{'lat':float(df['latitude'].median()) if len(df) else 25.05,'lon':float(df['longitude'].median()) if len(df) else 121.54},'zoom':12 if district=='all' else 13.3},margin={'l':0,'r':0,'t':0,'b':96},height=540,paper_bgcolor='#fffdf7',legend={'title':{'text':'圖例'},'orientation':'h','y':-.025,'yanchor':'top','x':0,'bgcolor':'#f2f3e8','bordercolor':'#e2e6d6','borderwidth':1,'font':{'size':12,'color':'#45603f'},'itemwidth':30,'itemsizing':'constant'},uirevision=f'{district}-{road}',legend_uirevision=f'{map_mode}')
     if map_mode=='official':
         add_official_overlay(fig,official_topic,official_query,official_selected)
@@ -418,7 +457,7 @@ def update_dashboard(district,road,species,issue,status,month,care_only,map_mode
     df['data_origin'] = '模擬通報／風險' if data_source == 'demo' else '真實資料'
     if 'report_count' in df:
         df = df.sort_values('report_count', ascending=False, kind='stable')
-    display_columns=['tree_id','tree_code','data_origin','district','road','species','issue_type','issue_status','risk_level','risk_score','diameter','height','survey_date']
+    display_columns=['tree_id','tree_code','tree_kind','data_origin','district','road','species','tree_status','watch_count','issue_type','issue_status','risk_level','risk_score','diameter','height','survey_date']
     for col in display_columns:
         if col not in df:df=df.assign(**{col:''})
     rate_value=(len(issue_df)/len(population)*1000) if len(population) else None
@@ -439,7 +478,8 @@ def show_tree(click_data,data_source='real'):
     def text_value(key,suffix=''):
         v=row.get(key,'')
         return '未記載' if pd.isna(v) or str(v)=='' else f'{v}{suffix}'
-    fields=[('樹木編號',text_value('tree_code')),('行政區',text_value('district')),('路段',text_value('road')),('樹種',text_value('species')),('通報類型',text_value('issue_type')),('通報確認狀態',text_value('issue_status')),('風險分級',f"{text_value('risk_level')}（{text_value('risk_score')}）"),('胸徑（來源值）',text_value('diameter')),('樹高（來源值）',text_value('height')),('調查日期',text_value('survey_date')),('掛牌日期',text_value('tagged_date')),('資料建立時間',text_value('source_created_at'))]
+    claim_text='認領中' if bool(row.get('claimed')) else '無人認領'
+    fields=[('樹木編號',text_value('tree_code')),('樹木類型',text_value('tree_kind')),('樹況（App）',text_value('tree_status')),('集氣票數',text_value('watch_count')),('樹靈認領',claim_text),('行政區',text_value('district')),('路段',text_value('road')),('樹種',text_value('species')),('通報類型',text_value('issue_type')),('通報確認狀態',text_value('issue_status')),('風險分級',f"{text_value('risk_level')}（{text_value('risk_score')}）"),('胸徑（來源值）',text_value('diameter')),('樹高（來源值）',text_value('height')),('調查日期',text_value('survey_date')),('掛牌日期',text_value('tagged_date')),('資料建立時間',text_value('source_created_at'))]
     return html.Div([html.Div([html.Span(label),html.Strong(value)],className='detail-row') for label,value in fields])
 
 @app.callback(Output('csv_download','data'),Input('export_button','n_clicks'),Input('district_filter','value'),Input('road_filter','value'),Input('species_filter','value'),Input('issue_filter','value'),Input('status_filter','value'),Input('month_filter','value'),Input('care_only','value'),Input('drill_filter','data'),Input('data_source','value'),prevent_initial_call=True)
@@ -566,6 +606,9 @@ def show_operation_history(cell,rows,data_source):
     children=[html.H4(f"樹木 {tree_code}｜{'模擬' if data_source=='demo' else '真實'}通報履歷")]
     for row in reports_for_tree.itertuples():
         children.append(html.Div([html.Strong(str(row.created_at)),html.Span(f'　通報：{row.issue_type}｜確認狀態：{row.issue_status}')],className='detail-row'))
+    events=CIVIC['events']
+    for event in events[events.tree_id.isin(ids)].sort_values('created_at').itertuples():
+        children.append(html.Div([html.Strong(local_time(event.created_at)),html.Span(f'　{event.kind_label}：{event.title}｜{event.actor_label}')],className='detail-row'))
     jobs,_=load_work_orders()
     for job in jobs[jobs.tree_location_id.astype(str).isin(ids) & jobs.is_simulated.eq(data_source=='demo')].itertuples():
         children.append(html.Div([html.Strong(str(job.created_at)),html.Span(f'　工單：{job.action}｜{job.job_status}｜班組：{job.team or "未提供"}')],className='detail-row'))
@@ -613,6 +656,51 @@ def update_reference_drill(*args):
     comparable=lambda value:{k:v for k,v in value.items() if k!='label'}
     result={} if comparable(current)==comparable(candidate) else candidate
     return result,None,None,None,None,None
+
+def local_time(value):
+    stamp=pd.to_datetime(value,errors='coerce',utc=True)
+    return '未提供' if pd.isna(stamp) else stamp.tz_convert('Asia/Taipei').strftime('%Y-%m-%d %H:%M')
+
+
+def civic_rows(tab,population,district):
+    tree_columns=population[['tree_id','tree_code','tree_kind','district','road','species']]
+    if tab=='petitions':
+        data=CIVIC['petitions'].copy()
+        if district!='all' and len(data):
+            data=data[data['address'].astype(str).str.contains(district,regex=False)]
+        columns=[('address','地點'),('origin_label','來源'),('status_label','狀態'),('seed_count','已種苗數'),('threshold','門檻'),('species_summary','樹種意向'),('created_at','建立時間')]
+    elif tab=='claims':
+        data=CIVIC['claims'].merge(tree_columns,on='tree_id',how='inner')
+        columns=[('tree_code','樹木編號'),('tree_kind','類型'),('district','行政區'),('road','路段'),('species','樹種'),('claimed_at','認領時間'),('expires_at','到期'),('checkin_streak','連續簽到')]
+    elif tab=='events':
+        data=CIVIC['events'].merge(tree_columns,on='tree_id',how='inner')
+        columns=[('created_at','時間'),('tree_code','樹木編號'),('district','行政區'),('species','樹種'),('kind_label','事件'),('title','標題'),('detail','說明'),('actor_label','來源')]
+    else:
+        data=CIVIC['status'].merge(tree_columns,on='tree_id',how='inner')
+        columns=[('tree_code','樹木編號'),('tree_kind','類型'),('district','行政區'),('road','路段'),('species','樹種'),('status_label','樹況'),('reason_label','原因'),('unit_name','管理單位'),('watch_count','集氣'),('updated_at','更新時間')]
+    data=data.copy()
+    for column in ('created_at','claimed_at','expires_at','updated_at'):
+        if column in data:data[column]=data[column].map(local_time)
+    return data,columns
+
+
+@app.callback(Output('civic_claims','children'),Output('civic_watch','children'),Output('civic_status','children'),Output('civic_petitions','children'),Output('civic_summary','children'),Output('civic_table','data'),Output('civic_table','columns'),Input('civic_tab','value'),*analysis_inputs)
+def render_civic(tab,*filters):
+    population=ensure_civic_columns(selected_report_data(*filters)[0])
+    district=filters[0]
+    claims=int(population['claimed'].sum())
+    watch=int(population['watch_count'].sum())
+    unhealthy=int((~population['tree_status'].isin(['健康','無紀錄'])).sum())
+    petitions=CIVIC['petitions']
+    if district!='all' and len(petitions):
+        petitions=petitions[petitions['address'].astype(str).str.contains(district,regex=False)]
+    open_slots=int(petitions['status'].eq('open').sum()) if len(petitions) else 0
+    data,columns=civic_rows(tab,population,district)
+    summary=f'真實資料｜符合 {len(data):,} 筆' if CIVIC_READY else '公民護樹資料尚未連線'
+    frame=data.reindex(columns=[c for c,_ in columns])
+    rows=frame.head(1000).astype(object).where(pd.notna(frame.head(1000)),'未提供').to_dict('records')
+    return f'{claims:,}',f'{watch:,}',f'{unhealthy:,}',f'{open_slots:,}',summary,rows,[{'id':c,'name':n} for c,n in columns]
+
 
 if __name__=='__main__':
     app.run(debug=False,host='127.0.0.1',port=8050)

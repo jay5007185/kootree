@@ -9,9 +9,21 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 REQUIRED = ['tree_id', 'district', 'road', 'species', 'latitude', 'longitude']
-OPTIONAL_TEXT = ['tree_code', 'survey_date', 'issue_type', 'issue_status', 'risk_level', 'tagged_date', 'source_created_at']
+OPTIONAL_TEXT = ['tree_code', 'tree_kind', 'survey_date', 'issue_type', 'issue_status', 'risk_level', 'tagged_date', 'source_created_at']
 OPTIONAL_NUMBER = ['diameter', 'height', 'diameter_cm', 'height_m', 'risk_score', 'case_age_days']
+PAGE_SIZE = 1000
 TAIPEI_DISTRICTS = '中正區|大同區|中山區|松山區|大安區|萬華區|信義區|士林區|北投區|內湖區|南港區|文山區'
+# tree_locations 一張表裝兩種樹：公園處行道樹與文化局受保護樹木。
+TREE_TYPES = {'street': '行道樹', 'protected': '受保護樹木'}
+# 樹靈記 App（PlantyFun）寫入 tree_reports.type 的代碼；未知代碼原樣顯示。
+REPORT_TYPE_LABELS = {
+    'disease_sign': '疑似病徵',
+    'broken_or_fallen': '斷枝倒伏',
+    'cut_or_missing': '被砍或消失',
+    'tag_lost': '樹牌遺失',
+    'newly_planted': '新植',
+    'other': '其他',
+}
 
 
 def read_session():
@@ -39,6 +51,7 @@ def map_tree_locations(rows):
         mapped.append({
             'tree_id': row['id'],
             'tree_code': row.get('code'),
+            'tree_kind': TREE_TYPES.get(row.get('tree_type'), row.get('tree_type')),
             'district': district,
             'road': row.get('region'),
             'species': row['species_name'],
@@ -97,22 +110,26 @@ def load_rows(environ=None, session=None, table=None, select="*", order_column="
     if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', table):
         raise ValueError('SUPABASE_TREES_TABLE 必須是資料表或 view 名稱')
     schema = env.get('SUPABASE_SCHEMA', 'public')
-    headers = {'apikey': key, 'Accept-Profile': schema, 'Prefer': 'count=exact'}
+    headers = {'apikey': key, 'Accept-Profile': schema}
     # New sb_secret / sb_publishable keys are not bearer JWTs.
     if not key.startswith(('sb_secret_', 'sb_publishable_')):
         headers['Authorization'] = f'Bearer {key}'
     client = requests if session is None else session
     rows = []
     total = None
-    query = {'select': select, 'order': f'{order_column}.asc', 'limit': 1000}
+    query = {'select': select, 'order': f'{order_column}.asc', 'limit': PAGE_SIZE}
     query.update(filters or {})
     while total is None or len(rows) < total:
         params = dict(query)
         if rows:
             params[order_column] = f'gt.{rows[-1][order_column]}'
+        # Prefer: count=exact 會讓 PostgREST 對整張表多做一次 COUNT；九萬筆的
+        # tree_locations 分 94 頁就是 94 次全表計數，吃掉 Supabase 磁碟 I/O 額度。
+        # 只在第一頁要總數，之後用 keyset 分頁，最後再核對總筆數。
+        page_headers = dict(headers, Prefer='count=exact') if total is None else headers
         try:
             response = client.get(
-                f'{url}/rest/v1/{table}', headers=headers,
+                f'{url}/rest/v1/{table}', headers=page_headers,
                 params=params,
                 timeout=30, allow_redirects=False,
             )
@@ -126,20 +143,18 @@ def load_rows(environ=None, session=None, table=None, select="*", order_column="
             raise ValueError('Supabase 回應不是有效 JSON') from None
         if not isinstance(page, list) or any(not isinstance(row, dict) for row in page):
             raise ValueError('Supabase 回應格式錯誤')
-        count = response.headers.get('Content-Range', '').rsplit('/', 1)[-1]
-        if not count.isdigit():
-            raise ValueError('Supabase 未回傳資料總數，無法確認是否完整讀取')
-        current_total = int(count)
-        if total is not None and total != len(rows) + current_total:
-            raise ValueError('Supabase 資料讀取期間有異動，請重新啟動載入')
-        total = len(rows) + current_total
+        if total is None:
+            count = response.headers.get('Content-Range', '').rsplit('/', 1)[-1]
+            if not count.isdigit():
+                raise ValueError('Supabase 未回傳資料總數，無法確認是否完整讀取')
+            total = int(count)
         if not page:
             if len(rows) != total:
                 raise ValueError('Supabase 分頁資料不完整')
             break
         rows.extend(page)
         if len(rows) > total:
-            raise ValueError('Supabase 分頁筆數與總數不一致')
+            raise ValueError('Supabase 資料讀取期間有異動，請重新啟動載入')
     return rows
 
 
@@ -150,8 +165,8 @@ def load_trees(environ=None, session=None):
     env = os.environ if environ is None else environ
     table = env.get('SUPABASE_TREES_TABLE', '')
     if table == 'tree_locations':
-        rows = load_rows(env, session, select='id,code,species_name,lat,lng,division_name,address,region,height,diameter,hang_tag_date,created_at',
-                         filters={'tree_type': 'eq.street'})
+        rows = load_rows(env, session, select='id,code,tree_type,species_name,lat,lng,division_name,address,region,height,diameter,hang_tag_date,created_at',
+                         filters={'tree_type': 'in.(' + ','.join(TREE_TYPES) + ')'})
         return normalize_trees(map_tree_locations(rows))
     return normalize_trees(load_rows(env, session, order_column='tree_id'))
 
@@ -169,7 +184,8 @@ def normalize_reports(rows, now=None):
     if df['id'].isna().any() or df['id'].duplicated().any() or df['tree_location_id'].isna().any():
         raise ValueError('Supabase 通報編號有缺漏或重複')
     df['tree_id'] = df['tree_location_id'].astype(str)
-    df['issue_type'] = df['type'].fillna('未分類').replace('', '未分類')
+    raw_type = df['type'].fillna('未分類').replace('', '未分類').astype(str)
+    df['issue_type'] = raw_type.map(REPORT_TYPE_LABELS).fillna(raw_type)
     # Confirmation is not closure. No work-order status exists in this schema.
     df['issue_status'] = '未提供'
     df.loc[df['dismissed'].eq(False), 'issue_status'] = '待確認'

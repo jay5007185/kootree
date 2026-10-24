@@ -1,8 +1,26 @@
 # 臺北市智慧行道樹管理平台 — MVP
 
+## 樹靈記 App 公民護樹資料（新增）
+
+`dashboard_supabase.py` 現在同時讀取 `tree_locations` 的行道樹（`street`）與文化局受保護樹木（`protected`），並加入樹靈記 App（PlantyFun）使用者產生的公民護樹資料，全部只讀：
+
+| 資料 | 來源表 | 呈現位置 |
+| --- | --- | --- |
+| 市民通報 | `tree_reports` | 既有通報圖表；App 的類型代碼（`disease_sign` 等）顯示為中文 |
+| 樹靈認領 | `tree_claims`（只算未到期） | 公民護樹區塊、樹木資訊、地圖「護樹狀態」圖層 |
+| 樹況與集氣 | `tree_status_view` | 同上；樹況只有已驗證管理單位帳號能改 |
+| 時間軸 | `tree_events` | 公民護樹區塊、案件資料中心的逐樹履歷 |
+| 請願空位 | `petition_slot_summary` | 公民護樹區塊，依地址比對行政區 |
+
+這些表的 RLS 開放匿名讀取，publishable key 即可。任何一張讀不到只會在該區塊標示缺漏，不影響其他資料。欄位對應與中文標籤在 `scripts/civic_data.py`。
+
+### Supabase I/O 用量
+
+讀取程式改為只在第一頁要求 `count=exact`、其後用 keyset 分頁（`scripts/supabase_data.py`），`kootree_rows` 快照改用 `ordinal` keyset 取代 `offset`（`scripts/supabase_store.py`），`app.py` 預設關閉 Dash 的 `debug` 自動重載。每次啟動仍會把約 9.7 萬棵樹整張讀完，請避免頻繁重啟。
+
 ## Supabase 即時樹籍版本（新增）
 
-本次新增 `dashboard_supabase.py`，直接唯讀查詢既有的 `tree_locations`、`tree_reports`、`dashboard_demo_reports`、`tree_species_care_profiles` 與 `tree_species_care_rules`。保留原 `app.py` 的官方移除／移植、資料中心、品牌及快照功能，兩個入口可分別啟動。
+本次新增 `dashboard_supabase.py`，直接唯讀查詢既有的 `tree_locations`、`tree_reports`、`dashboard_demo_reports`、`tree_species_care_profiles` 與 `tree_species_care_rules`，以及上一節的公民護樹資料表。保留原 `app.py` 的官方移除／移植、資料中心、品牌及快照功能，兩個入口可分別啟動。
 
 ```bash
 pip install -r requirements.txt

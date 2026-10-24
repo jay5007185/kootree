@@ -8,20 +8,23 @@ def store(monkeypatch):
     return Store()
 
 
-def test_read_paginates_using_actual_returned_size(monkeypatch):
+def test_read_paginates_by_ordinal_keyset_not_offset(monkeypatch):
     client = store(monkeypatch)
-    offsets = []
+    cursors = []
     def request(method, path, **kwargs):
         if path == 'kootree_active_datasets':
             return [{'import_id': 'snapshot'}]
         if path == 'kootree_imports':
             return [{'row_count': 3, 'metadata': {'data_mode': '官方資料'}}]
-        offset = kwargs['params']['offset']
-        offsets.append(offset)
-        return [{'payload': {'tree_id': str(offset)}}]
+        params = kwargs['params']
+        assert 'offset' not in params  # OFFSET 分頁每頁都重掃前面的列，吃掉 Supabase I/O 額度
+        cursor = params.get('ordinal')
+        cursors.append(cursor)
+        ordinal = 0 if cursor is None else int(cursor.split('.')[1]) + 1
+        return [{'ordinal': ordinal, 'payload': {'tree_id': str(ordinal)}}]
     monkeypatch.setattr(client, 'request', request)
     rows, metadata = client.read('trees')
-    assert offsets == [0, 1, 2]
+    assert cursors == [None, 'gt.0', 'gt.1']
     assert [r['tree_id'] for r in rows] == ['0', '1', '2']
     assert metadata['data_mode'] == '官方資料'
 

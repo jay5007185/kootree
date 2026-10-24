@@ -21,3 +21,16 @@
 養護工單由 `dashboard_work_orders` 讀取，欄位契約在 `supabase/dashboard_work_orders_schema.sql`。此腳本僅建置資料表，不生成虛構工單。`is_simulated` 明確隔離展示資料；工單狀態與通報確認狀態獨立。未建立或無讀取權限時顯示資料來源缺漏，不把缺漏當成零件已處理。
 
 歷史趨勢採已有的通報日期；沒有結案日期時不產生結案曲線。官方與工單資料啟動後快取，資料更新後重新啟動後台。
+
+## 樹靈記 App 公民護樹資料
+
+同一個 Supabase 專案也是樹靈記 iOS App 的後端。App 使用者會寫入 `tree_reports`（市民通報）、`tree_claims`（樹靈認領）、`watch_votes`（集氣，透過 `tree_status_view.watch_count` 讀）、`tree_events`（時間軸）、`petition_slots` / `petition_seeds`（請願，透過 `petition_slot_summary` 讀）；`tree_status` 只有已驗證的管理單位帳號能改。
+
+後台對應：
+
+- 樹籍同時載入行道樹與受保護樹木，表格與樹木資訊顯示「類型」，App 對受保護樹木的通報不再被排除。
+- 通報類型代碼依 App 的 `TreeReportType` 顯示中文；未知代碼原樣顯示，不猜測。
+- 地圖新增「護樹狀態」圖層：樹況（已移除／預定移除／觀察中／已補植）優先，其次集氣中、認領中，其餘標示無紀錄。
+- 「公民護樹」區塊與篩選同步，四張數字卡（認領中、集氣票數、樹況非健康、募集中的請願空位）及四個分頁清單；逐樹履歷同時列出通報與時間軸事件。
+- 認領只計未到期者；請願空位沒有樹籍關聯，依地址文字比對行政區。
+- 葉幣、道具、步數、樹靈本體（`point_ledger`、`user_items`、`step_days`、`spirits`）只有本人可讀，匿名查到永遠是空的，後台不讀。全市統計需由資料管理者另開聚合 view。

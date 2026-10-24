@@ -43,6 +43,9 @@ def test_pagination_handles_server_page_limit_and_no_synthetic_cases():
     assert data['tree_id'].tolist() == ['1', '2', '3']
     assert client.calls[1][1]['params']['tree_id'] == 'gt.2'
     assert 'Authorization' not in client.calls[0][1]['headers']
+    # 只有第一頁要 count=exact；每頁都要會讓 PostgREST 重複全表計數，耗 Supabase I/O 額度。
+    assert client.calls[0][1]['headers']['Prefer'] == 'count=exact'
+    assert 'Prefer' not in client.calls[1][1]['headers']
     assert data['issue_type'].eq('未提供').all()
     assert data['risk_score'].isna().all()
 
@@ -104,7 +107,8 @@ def test_tree_locations_maps_schema_and_paginates_by_uuid():
     assert client.calls[0][0].endswith('/rest/v1/tree_locations')
     assert client.calls[0][1]['params']['order'] == 'id.asc'
     assert client.calls[1][1]['params']['id'] == 'gt.uuid-1'
-    assert client.calls[0][1]['params']['tree_type'] == 'eq.street'
+    assert client.calls[0][1]['params']['tree_type'] == 'in.(street,protected)'
+    assert 'tree_type' in client.calls[0][1]['params']['select'].split(',')
     assert 'images' not in client.calls[0][1]['params']['select']
     assert client.calls[0][1]['headers']['Accept-Profile'] == 'public'
 
@@ -146,3 +150,20 @@ def test_missing_official_code_does_not_fall_back_to_uuid_or_make_up_measurement
     data = load_trees(dict(ENV, SUPABASE_TREES_TABLE='tree_locations'), client)
     assert data.iloc[0]['tree_code'] == '未提供'
     assert data[['height', 'diameter']].isna().all().all()
+
+
+def test_tree_locations_keeps_both_tree_types_with_labels():
+    client = Client([Response([location('s1', tree_type='street'), location('p1', tree_type='protected', region=None)], 2)])
+    data = load_trees(dict(ENV, SUPABASE_TREES_TABLE='tree_locations'), client)
+    assert data['tree_kind'].tolist() == ['行道樹', '受保護樹木']
+    assert data.iloc[1]['road'] == '未提供'
+
+
+def test_reports_show_app_type_codes_in_chinese_and_keep_unknown_codes():
+    from scripts.supabase_data import normalize_reports
+    rows = [{'id': 'r1', 'tree_location_id': 't1', 'type': 'disease_sign', 'created_at': '2026-10-24T00:00:00Z', 'confirmed_at': None, 'dismissed': False},
+            {'id': 'r2', 'tree_location_id': 't1', 'type': 'broken_or_fallen', 'created_at': '2026-10-24T00:00:00Z', 'confirmed_at': '2026-10-24T01:00:00Z', 'dismissed': False},
+            {'id': 'r3', 'tree_location_id': 't2', 'type': 'something_new', 'created_at': '2026-10-24T00:00:00Z', 'confirmed_at': None, 'dismissed': True}]
+    reports = normalize_reports(rows)
+    assert reports['issue_type'].tolist() == ['疑似病徵', '斷枝倒伏', 'something_new']
+    assert reports['issue_status'].tolist() == ['待確認', '已確認', '已排除']

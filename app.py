@@ -618,4 +618,5 @@ def switch_map_reader(tab):
 
 
 if __name__=='__main__':
-    app.run(debug=True,dev_tools_ui=False,host='127.0.0.1',port=8050)
+    # debug=True 會在每次存檔時重載並把整份 Supabase 資料重讀一遍；開發時再手動開。
+    app.run(debug=False,host='127.0.0.1',port=8050)

@@ -50,12 +50,18 @@ class Store:
         snapshot = self.request('GET', 'kootree_imports', params={
             'id': 'eq.' + import_id, 'select': 'row_count,metadata'})[0]
         rows = []
+        last_ordinal = None
         while len(rows) < snapshot['row_count']:
-            batch = self.request('GET', 'kootree_rows', params={
-                'import_id': 'eq.' + import_id, 'select': 'payload',
-                'order': 'ordinal.asc', 'offset': len(rows), 'limit': 1000})
+            # Keyset pagination on ordinal: OFFSET makes Postgres walk every skipped row
+            # again on each page, which is what burns Supabase disk I/O on 90k-row snapshots.
+            params = {'import_id': 'eq.' + import_id, 'select': 'ordinal,payload',
+                      'order': 'ordinal.asc', 'limit': 1000}
+            if last_ordinal is not None:
+                params['ordinal'] = f'gt.{last_ordinal}'
+            batch = self.request('GET', 'kootree_rows', params=params)
             if not batch:
                 raise RuntimeError(f'Incomplete Supabase dataset: {dataset}')
+            last_ordinal = batch[-1]['ordinal']
             rows.extend(row['payload'] for row in batch)
         if len(rows) != snapshot['row_count']:
             raise RuntimeError(f'Supabase row count mismatch: {dataset}')
